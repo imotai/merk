@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rocksdb::{checkpoint::Checkpoint, ColumnFamilyDescriptor, WriteBatch};
 
 use crate::error::{Error, Result};
-use crate::proofs::{encode_into, query::QueryItem, Query};
+use crate::proofs::{encode_into, query::QueryItem, Op as ProofOp, Query};
 use crate::tree::{Batch, Commit, Fetch, Hash, Link, Op, RefWalker, Tree, Walker, NULL_HASH};
 
 const ROOT_KEY_KEY: &[u8] = b"root";
@@ -281,6 +281,20 @@ impl Merk {
         self.prove_unchecked(query)
     }
 
+    pub fn execute_query(&self, query: Query) -> Result<LinkedList<ProofOp>> {
+        let query_vec: Vec<QueryItem> = query.into_iter().map(Into::into).collect();
+        self.use_tree_mut(|maybe_tree| {
+            let tree = match maybe_tree {
+                None => {
+                    return Err(Error::Proof("Cannot create proof for empty tree".into()));
+                }
+                Some(tree) => tree,
+            };
+            let mut ref_walker = RefWalker::new(tree, self.source());
+            let ops = ref_walker.execute_query(query_vec.as_slice())?;
+            Ok(ops)
+        })
+    }
     /// Creates a Merkle proof for the list of queried keys. For each key in the
     /// query, if the key is found in the store then the value will be proven to
     /// be in the tree. For each key in the query that does not exist in the
@@ -498,16 +512,15 @@ fn fetch_existing_node(db: &rocksdb::DB, key: &[u8]) -> Result<Tree> {
         Some(node) => Ok(node),
     }
 }
-
 #[cfg(test)]
 mod test {
     use super::{Merk, MerkSource, RefWalker};
+    use crate::proofs::query::Query;
     use crate::test_utils::*;
     use crate::Op;
+    use std::ops::Range;
     use std::thread;
-
     // TODO: Close and then reopen test
-
     fn assert_invariants(merk: &TempMerk) {
         merk.use_tree(|maybe_tree| {
             let tree = maybe_tree.expect("expected tree");
@@ -617,6 +630,31 @@ mod test {
     }
 
     #[test]
+    fn test_range_query() {
+        let path = thread::current().name().unwrap().to_owned();
+        let mut merk = TempMerk::open(path).expect("failed to open merk");
+        // uncached
+        merk.apply(
+            &[
+                (vec![0], Op::Put(vec![0])),
+                (vec![1], Op::Put(vec![1])),
+                (vec![2], Op::Put(vec![2])),
+                (vec![3], Op::Put(vec![3])),
+            ],
+            &[],
+        )
+        .unwrap();
+        let mut query = Query::new();
+        let range = Range {
+            start: vec![1],
+            end: vec![4],
+        };
+        query.insert_range(range);
+        let ops = merk.execute_query(query).unwrap();
+        assert_eq!(3, ops.len());
+    }
+
+    #[test]
     fn get_not_found() {
         let path = thread::current().name().unwrap().to_owned();
         let mut merk = TempMerk::open(path).expect("failed to open merk");
@@ -686,7 +724,6 @@ mod test {
                 iter.next();
             }
         }
-
         let time = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()
