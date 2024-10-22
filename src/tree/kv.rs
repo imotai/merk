@@ -75,7 +75,11 @@ impl Encode for KV {
 
     #[inline]
     fn encoding_length(&self) -> Result<usize> {
-        debug_assert!(self.key().len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65535,
+            "Key length must be less than 65535"
+        );
+
         Ok(HASH_LENGTH + self.value.len())
     }
 }

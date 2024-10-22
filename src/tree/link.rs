@@ -221,7 +221,10 @@ impl Encode for Link {
             Link::Modified { .. } => panic!("No encoding for Link::Modified"),
         };
 
-        debug_assert!(key.len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65535,
+            "Key length must be less than 65535"
+        );
 
         out.write_all(&[key.len() as u8])?;
         out.write_all(key)?;
@@ -235,7 +238,10 @@ impl Encode for Link {
 
     #[inline]
     fn encoding_length(&self) -> Result<usize> {
-        debug_assert!(self.key().len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65535,
+            "Key length must be less than 65535"
+        );
 
         Ok(match self {
             Link::Reference { key, .. } => 1 + key.len() + 32 + 2,

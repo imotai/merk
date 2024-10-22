@@ -18,10 +18,10 @@ impl Encode for Op {
                 dest.write_all(kv_hash)?;
             }
             Op::Push(Node::KV(key, value)) => {
-                debug_assert!(key.len() < 256);
+                debug_assert!(key.len() < 65536);
                 debug_assert!(value.len() < 65536);
-
-                dest.write_all(&[0x03, key.len() as u8])?;
+                dest.write_all(&[0x03])?;
+                (key.len() as u16).encode_into(dest)?;
                 dest.write_all(key)?;
                 (value.len() as u16).encode_into(dest)?;
                 dest.write_all(value)?;
@@ -36,7 +36,7 @@ impl Encode for Op {
         Ok(match self {
             Op::Push(Node::Hash(_)) => 1 + HASH_LENGTH,
             Op::Push(Node::KVHash(_)) => 1 + HASH_LENGTH,
-            Op::Push(Node::KV(key, value)) => 4 + key.len() + value.len(),
+            Op::Push(Node::KV(key, value)) => 5 + key.len() + value.len(),
             Op::Parent => 1,
             Op::Child => 1,
         })
@@ -59,7 +59,7 @@ impl Decode for Op {
                 Op::Push(Node::KVHash(hash))
             }
             0x03 => {
-                let key_len: u8 = Decode::decode(&mut input)?;
+                let key_len: u16 = Decode::decode(&mut input)?;
                 let mut key = vec![0; key_len as usize];
                 input.read_exact(key.as_mut_slice())?;
 
