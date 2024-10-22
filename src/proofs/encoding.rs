@@ -173,11 +173,11 @@ mod test {
     #[test]
     fn encode_push_kv() {
         let op = Op::Push(Node::KV(vec![1, 2, 3], vec![4, 5, 6]));
-        assert_eq!(op.encoding_length(), 10);
+        assert_eq!(op.encoding_length(), 11);
 
         let mut bytes = vec![];
         op.encode_into(&mut bytes).unwrap();
-        assert_eq!(bytes, vec![0x03, 3, 1, 2, 3, 0, 3, 4, 5, 6]);
+        assert_eq!(bytes, vec![0x03, 0, 3, 1, 2, 3, 0, 3, 4, 5, 6]);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod test {
     #[test]
     #[should_panic]
     fn encode_push_kv_long_key() {
-        let op = Op::Push(Node::KV(vec![123; 300], vec![4, 5, 6]));
+        let op = Op::Push(Node::KV(vec![123; 70_000], vec![4, 5, 6]));
         let mut bytes = vec![];
         op.encode_into(&mut bytes).unwrap();
     }
@@ -230,7 +230,7 @@ mod test {
 
     #[test]
     fn decode_push_kv() {
-        let bytes = [0x03, 3, 1, 2, 3, 0, 3, 4, 5, 6];
+        let bytes = [0x03, 0, 3, 1, 2, 3, 0, 3, 4, 5, 6];
         let op = Op::decode(&bytes[..]).expect("decode failed");
         assert_eq!(op, Op::Push(Node::KV(vec![1, 2, 3], vec![4, 5, 6])));
     }

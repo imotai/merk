@@ -467,7 +467,7 @@ mod test {
     #[should_panic]
     fn encode_link_long_key() {
         let link = Link::Reference {
-            key: vec![123; 300],
+            key: vec![123; 70_000],
             child_heights: (123, 124),
             hash: [55; 32],
         };
