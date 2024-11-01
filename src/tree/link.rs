@@ -222,8 +222,8 @@ impl Encode for Link {
         };
 
         debug_assert!(
-            self.key().len() < 65535,
-            "Key length must be less than 65535"
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
         );
 
         out.write_all(&[key.len() as u8])?;
@@ -239,8 +239,8 @@ impl Encode for Link {
     #[inline]
     fn encoding_length(&self) -> Result<usize> {
         debug_assert!(
-            self.key().len() < 65535,
-            "Key length must be less than 65535"
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
         );
 
         Ok(match self {
@@ -464,7 +464,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic = "Key length must be less than 65536"]
     fn encode_link_long_key() {
         let link = Link::Reference {
             key: vec![123; 70_000],
