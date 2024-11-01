@@ -11,6 +11,7 @@ use std::{
 //       field and value field.
 
 /// Contains a key/value pair, and the hash of the key/value pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KV {
     pub(super) key: Vec<u8>,
     pub(super) value: Vec<u8>,
@@ -75,7 +76,11 @@ impl Encode for KV {
 
     #[inline]
     fn encoding_length(&self) -> Result<usize> {
-        debug_assert!(self.key().len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
+        );
+
         Ok(HASH_LENGTH + self.value.len())
     }
 }

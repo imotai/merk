@@ -10,6 +10,7 @@ use super::Tree;
 
 /// Represents a reference to a child tree node. Links may or may not contain
 /// the child's `Tree` instance (storing its key if not).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     /// Represents a child tree node which has been pruned from memory, only
     /// retaining a reference to it (its key). The child node can always be
@@ -221,9 +222,12 @@ impl Encode for Link {
             Link::Modified { .. } => panic!("No encoding for Link::Modified"),
         };
 
-        debug_assert!(key.len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
+        );
 
-        out.write_all(&[key.len() as u8])?;
+        out.write_all(&(key.len() as u16).to_be_bytes())?;
         out.write_all(key)?;
 
         out.write_all(hash)?;
@@ -235,7 +239,10 @@ impl Encode for Link {
 
     #[inline]
     fn encoding_length(&self) -> Result<usize> {
-        debug_assert!(self.key().len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
+        );
 
         Ok(match self {
             Link::Reference { key, .. } => 1 + key.len() + 32 + 2,
@@ -279,7 +286,7 @@ impl Decode for Link {
             ref mut child_heights,
         } = self
         {
-            let length = read_u8(&mut input)? as usize;
+            let length = read_u16(&mut input)? as usize;
 
             key.resize(length, 0);
             input.read_exact(key.as_mut())?;
@@ -297,6 +304,13 @@ impl Decode for Link {
 }
 
 impl Terminated for Link {}
+
+#[inline]
+fn read_u16<R: Read>(mut input: R) -> Result<u16> {
+    let mut length = [0, 0];
+    input.read_exact(length.as_mut())?;
+    Ok(u16::from_be_bytes(length))
+}
 
 #[inline]
 fn read_u8<R: Read>(mut input: R) -> Result<u8> {
@@ -451,17 +465,31 @@ mod test {
         assert_eq!(
             bytes,
             vec![
-                3, 1, 2, 3, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
-                55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 123, 124
+                0, 3, 1, 2, 3, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
+                55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 123, 124
             ]
         );
     }
 
     #[test]
-    #[should_panic]
-    fn encode_link_long_key() {
+    fn encode_link_long_key_valid() {
         let link = Link::Reference {
-            key: vec![123; 300],
+            key: vec![123; 60_000],
+            child_heights: (123, 124),
+            hash: [55; 32],
+        };
+        let mut bytes = vec![];
+        link.encode_into(&mut bytes).unwrap();
+
+        let decoded = Link::decode(&bytes[..]).unwrap();
+        assert_eq!(decoded, link);
+    }
+
+    #[test]
+    #[should_panic = "Key length must be less than 65536"]
+    fn encode_link_long_key_invalid() {
+        let link = Link::Reference {
+            key: vec![123; 70_000],
             child_heights: (123, 124),
             hash: [55; 32],
         };
