@@ -226,7 +226,7 @@ impl Encode for Link {
             "Key length must be less than 65536"
         );
 
-        out.write_all(&[key.len() as u8])?;
+        out.write_all(&(key.len() as u16).to_be_bytes())?;
         out.write_all(key)?;
 
         out.write_all(hash)?;
@@ -285,7 +285,7 @@ impl Decode for Link {
             ref mut child_heights,
         } = self
         {
-            let length = read_u8(&mut input)? as usize;
+            let length = read_u16(&mut input)? as usize;
 
             key.resize(length, 0);
             input.read_exact(key.as_mut())?;
@@ -303,6 +303,13 @@ impl Decode for Link {
 }
 
 impl Terminated for Link {}
+
+#[inline]
+fn read_u16<R: Read>(mut input: R) -> Result<u16> {
+    let mut length = [0, 0];
+    input.read_exact(length.as_mut())?;
+    Ok(u16::from_be_bytes(length))
+}
 
 #[inline]
 fn read_u8<R: Read>(mut input: R) -> Result<u8> {
