@@ -10,6 +10,7 @@ use super::Tree;
 
 /// Represents a reference to a child tree node. Links may or may not contain
 /// the child's `Tree` instance (storing its key if not).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     /// Represents a child tree node which has been pruned from memory, only
     /// retaining a reference to it (its key). The child node can always be
@@ -464,15 +465,29 @@ mod test {
         assert_eq!(
             bytes,
             vec![
-                3, 1, 2, 3, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
-                55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 123, 124
+                0, 3, 1, 2, 3, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
+                55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 123, 124
             ]
         );
     }
 
     #[test]
+    fn encode_link_long_key_valid() {
+        let link = Link::Reference {
+            key: vec![123; 60_000],
+            child_heights: (123, 124),
+            hash: [55; 32],
+        };
+        let mut bytes = vec![];
+        link.encode_into(&mut bytes).unwrap();
+
+        let decoded = Link::decode(&bytes[..]).unwrap();
+        assert_eq!(decoded, link);
+    }
+
+    #[test]
     #[should_panic = "Key length must be less than 65536"]
-    fn encode_link_long_key() {
+    fn encode_link_long_key_invalid() {
         let link = Link::Reference {
             key: vec![123; 70_000],
             child_heights: (123, 124),
