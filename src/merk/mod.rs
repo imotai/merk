@@ -17,8 +17,11 @@ use crate::tree::{Batch, Commit, Fetch, GetResult, Hash, Op, RefWalker, Tree, Wa
 pub use self::snapshot::Snapshot;
 
 const ROOT_KEY_KEY: &[u8] = b"root";
+const FORMAT_VERSION_KEY: &[u8] = b"format";
 const AUX_CF_NAME: &str = "aux";
 const INTERNAL_CF_NAME: &str = "internal";
+
+const FORMAT_VERSION: u64 = 1;
 
 fn column_families() -> Vec<ColumnFamilyDescriptor> {
     vec![
@@ -390,6 +393,14 @@ impl Merk {
                 Op::Delete => batch.delete_cf(aux_cf, key),
             };
         }
+
+        // update format version
+        // TODO: shouldn't need a write per commit
+        batch.put_cf(
+            internal_cf,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION.to_be_bytes(),
+        );
 
         // write to db
         self.write(batch)?;
