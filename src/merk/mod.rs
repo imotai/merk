@@ -425,7 +425,7 @@ impl Merk {
         batch.put_cf(
             internal_cf,
             FORMAT_VERSION_KEY,
-            &FORMAT_VERSION.to_be_bytes(),
+            FORMAT_VERSION.to_be_bytes(),
         );
 
         // write to db
