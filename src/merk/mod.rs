@@ -81,6 +81,16 @@ impl Merk {
         })
     }
 
+    pub fn open_and_get_aux<P>(path: P, key: &[u8]) -> Result<Option<Vec<u8>>>
+    where
+        P: AsRef<Path>,
+    {
+        let db_opts = Merk::default_db_opts();
+        let db = rocksdb::DB::open_cf_descriptors(&db_opts, path, column_families())?;
+        let aux_cf = db.cf_handle(AUX_CF_NAME).unwrap();
+        Ok(db.get_cf(aux_cf, key)?)
+    }
+
     pub fn default_db_opts() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
