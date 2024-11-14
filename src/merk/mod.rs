@@ -60,6 +60,14 @@ impl Merk {
             false,
         )?;
 
+        let format_version = load_format_version(&db)?;
+        if format_version != FORMAT_VERSION {
+            return Err(Error::Version(format!(
+                "Format version mismatch: expected {}, found {}",
+                FORMAT_VERSION, format_version,
+            )));
+        }
+
         Ok(Merk {
             tree: RwLock::new(load_root(&db)?),
             db,
@@ -75,7 +83,25 @@ impl Merk {
     {
         let mut path_buf = PathBuf::new();
         path_buf.push(path);
-        let db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
+
+        let mut db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
+        let format_version = load_format_version(&db)?;
+        let has_root = load_root(&db)?.is_some();
+
+        if has_root {
+            if format_version == 0 {
+                log::info!("Migrating store from version 0 to {}...", FORMAT_VERSION);
+
+                drop(db);
+                Merk::migrate_from_v0(&path_buf)?;
+                db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
+            } else if format_version != FORMAT_VERSION {
+                return Err(Error::Version(format!(
+                    "Unknown format version: expected <= {}, found {}",
+                    FORMAT_VERSION, format_version,
+                )));
+            }
+        }
 
         Ok(Merk {
             tree: RwLock::new(load_root(&db)?),
@@ -557,6 +583,18 @@ fn load_root(db: &DB) -> Result<Option<Tree>> {
     db.get_pinned_cf(internal_cf, ROOT_KEY_KEY)?
         .map(|key| MerkSource { db }.fetch_by_key_expect(key.to_vec().as_slice()))
         .transpose()
+}
+
+fn load_format_version(db: &DB) -> Result<u64> {
+    let internal_cf = db.cf_handle(INTERNAL_CF_NAME).unwrap();
+    let maybe_version = db.get_pinned_cf(internal_cf, FORMAT_VERSION_KEY)?;
+    let Some(version) = maybe_version else {
+        return Ok(0);
+    };
+
+    let mut buf = [0; 8];
+    buf.copy_from_slice(&version);
+    Ok(u64::from_be_bytes(buf))
 }
 
 #[cfg(test)]
