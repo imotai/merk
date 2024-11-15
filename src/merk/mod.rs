@@ -86,9 +86,8 @@ impl Merk {
 
         let mut db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
         let format_version = load_format_version(&db)?;
-        let has_root = load_root(&db)?.is_some();
 
-        if has_root {
+        if has_root(&db)? {
             if format_version == 0 {
                 log::info!("Migrating store from version 0 to {}...", FORMAT_VERSION);
 
@@ -576,6 +575,11 @@ where
     let mut bytes = Vec::with_capacity(128);
     encode_into(proof.iter(), &mut bytes);
     Ok(bytes)
+}
+
+fn has_root(db: &DB) -> Result<bool> {
+    let internal_cf = db.cf_handle(INTERNAL_CF_NAME).unwrap();
+    Ok(db.get_pinned_cf(internal_cf, ROOT_KEY_KEY)?.is_some())
 }
 
 fn load_root(db: &DB) -> Result<Option<Tree>> {
