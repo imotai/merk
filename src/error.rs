@@ -45,6 +45,8 @@ pub enum Error {
     UnexpectedNode(String),
     #[error("Unknown Error")]
     Unknown,
+    #[error("Version Error: {0}")]
+    Version(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

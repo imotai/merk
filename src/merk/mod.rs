@@ -17,8 +17,11 @@ use crate::tree::{Batch, Commit, Fetch, GetResult, Hash, Op, RefWalker, Tree, Wa
 pub use self::snapshot::Snapshot;
 
 const ROOT_KEY_KEY: &[u8] = b"root";
+const FORMAT_VERSION_KEY: &[u8] = b"format";
 const AUX_CF_NAME: &str = "aux";
 const INTERNAL_CF_NAME: &str = "internal";
+
+const FORMAT_VERSION: u64 = 1;
 
 fn column_families() -> Vec<ColumnFamilyDescriptor> {
     vec![
@@ -57,6 +60,14 @@ impl Merk {
             false,
         )?;
 
+        let format_version = load_format_version(&db)?;
+        if format_version != FORMAT_VERSION {
+            return Err(Error::Version(format!(
+                "Format version mismatch: expected {}, found {}",
+                FORMAT_VERSION, format_version,
+            )));
+        }
+
         Ok(Merk {
             tree: RwLock::new(load_root(&db)?),
             db,
@@ -72,13 +83,41 @@ impl Merk {
     {
         let mut path_buf = PathBuf::new();
         path_buf.push(path);
-        let db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
+
+        let mut db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
+        let format_version = load_format_version(&db)?;
+        let has_root = load_root(&db)?.is_some();
+
+        if has_root {
+            if format_version == 0 {
+                log::info!("Migrating store from version 0 to {}...", FORMAT_VERSION);
+
+                drop(db);
+                Merk::migrate_from_v0(&path_buf)?;
+                db = rocksdb::DB::open_cf_descriptors(&db_opts, &path_buf, column_families())?;
+            } else if format_version != FORMAT_VERSION {
+                return Err(Error::Version(format!(
+                    "Unknown format version: expected <= {}, found {}",
+                    FORMAT_VERSION, format_version,
+                )));
+            }
+        }
 
         Ok(Merk {
             tree: RwLock::new(load_root(&db)?),
             db,
             path: path_buf,
         })
+    }
+
+    pub fn open_and_get_aux<P>(path: P, key: &[u8]) -> Result<Option<Vec<u8>>>
+    where
+        P: AsRef<Path>,
+    {
+        let db_opts = Merk::default_db_opts();
+        let db = rocksdb::DB::open_cf_descriptors(&db_opts, path, column_families())?;
+        let aux_cf = db.cf_handle(AUX_CF_NAME).unwrap();
+        Ok(db.get_cf(aux_cf, key)?)
     }
 
     pub fn default_db_opts() -> rocksdb::Options {
@@ -265,6 +304,59 @@ impl Merk {
         Self::open(path)
     }
 
+    pub fn migrate_from_v0<P: AsRef<Path>>(path: P) -> Result<()> {
+        use rocksdb::IteratorMode;
+
+        let path = path.as_ref().to_path_buf();
+        let db =
+            rocksdb::DB::open_cf_descriptors(&Merk::default_db_opts(), &path, column_families())?;
+
+        let create_path = |suffix| {
+            let mut tmp_path = path.clone();
+            let tmp_file_name =
+                format!("{}-{}", path.file_name().unwrap().to_str().unwrap(), suffix);
+            tmp_path.set_file_name(tmp_file_name);
+            tmp_path
+        };
+
+        let tmp_path = create_path("migrate1");
+        let tmp = Merk::open(&tmp_path)?;
+        tmp.destroy()?;
+
+        // TODO: split up batch
+        let batch: Vec<_> = db
+            .iterator(IteratorMode::Start)
+            .map(|entry| -> Result<_> {
+                dbg!();
+                let (key, node_bytes) = entry.unwrap(); // TODO
+                dbg!(&key, node_bytes.len());
+                let node = Tree::decode_v0(&mut &node_bytes[..])?;
+                dbg!();
+                Ok((key.to_vec(), Op::Put(node.value().to_vec())))
+            })
+            .collect::<Result<_>>()?;
+
+        let aux_cf = db.cf_handle(AUX_CF_NAME).unwrap();
+        let aux: Vec<_> = db
+            .iterator_cf(aux_cf, IteratorMode::Start)
+            .map(|entry| {
+                let (key, value) = entry.unwrap(); // TODO
+                (key.to_vec(), Op::Put(value.to_vec()))
+            })
+            .collect();
+
+        let mut tmp = Self::open(&tmp_path)?;
+        tmp.apply(&batch, &aux)?;
+        drop(tmp);
+
+        let tmp_path2 = create_path("migrate2");
+        std::fs::rename(&path, &tmp_path2)?;
+        std::fs::rename(&tmp_path, &path)?;
+        std::fs::remove_dir_all(&tmp_path2)?;
+
+        Ok(())
+    }
+
     /// Creates a Merkle proof for the list of queried keys. For each key in the
     /// query, if the key is found in the store then the value will be proven to
     /// be in the tree. For each key in the query that does not exist in the
@@ -327,6 +419,14 @@ impl Merk {
                 Op::Delete => batch.delete_cf(aux_cf, key),
             };
         }
+
+        // update format version
+        // TODO: shouldn't need a write per commit
+        batch.put_cf(
+            internal_cf,
+            FORMAT_VERSION_KEY,
+            FORMAT_VERSION.to_be_bytes(),
+        );
 
         // write to db
         self.write(batch)?;
@@ -483,6 +583,18 @@ fn load_root(db: &DB) -> Result<Option<Tree>> {
     db.get_pinned_cf(internal_cf, ROOT_KEY_KEY)?
         .map(|key| MerkSource { db }.fetch_by_key_expect(key.to_vec().as_slice()))
         .transpose()
+}
+
+fn load_format_version(db: &DB) -> Result<u64> {
+    let internal_cf = db.cf_handle(INTERNAL_CF_NAME).unwrap();
+    let maybe_version = db.get_pinned_cf(internal_cf, FORMAT_VERSION_KEY)?;
+    let Some(version) = maybe_version else {
+        return Ok(0);
+    };
+
+    let mut buf = [0; 8];
+    buf.copy_from_slice(&version);
+    Ok(u64::from_be_bytes(buf))
 }
 
 #[cfg(test)]

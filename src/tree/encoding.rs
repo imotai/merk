@@ -1,4 +1,8 @@
-use super::Tree;
+use std::io::Read;
+
+use crate::Result;
+
+use super::{kv::KV, Link, Tree, TreeInner};
 use ed::{Decode, Encode};
 
 impl Tree {
@@ -33,6 +37,30 @@ impl Tree {
         let mut tree: Tree = Decode::decode(input).unwrap();
         tree.inner.kv.key = key;
         tree
+    }
+
+    pub fn decode_v0<R: Read>(mut input: R) -> Result<Self> {
+        let mut read_link_v0 = || -> Result<Option<Link>> {
+            let some = bool::decode(&mut input)?;
+            if some {
+                let link = Link::decode_v0(&mut input)?;
+                Ok(Some(link))
+            } else {
+                Ok(None)
+            }
+        };
+
+        let maybe_left = read_link_v0()?;
+        let maybe_right = read_link_v0()?;
+        let kv = KV::decode(&mut input)?;
+
+        Ok(Tree {
+            inner: Box::new(TreeInner {
+                left: maybe_left,
+                right: maybe_right,
+                kv,
+            }),
+        })
     }
 }
 
