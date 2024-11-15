@@ -304,54 +304,29 @@ impl Merk {
     }
 
     pub fn migrate_from_v0<P: AsRef<Path>>(path: P) -> Result<()> {
-        use rocksdb::IteratorMode;
-
         let path = path.as_ref().to_path_buf();
         let db =
             rocksdb::DB::open_cf_descriptors(&Merk::default_db_opts(), &path, column_families())?;
 
-        let create_path = |suffix| {
-            let mut tmp_path = path.clone();
-            let tmp_file_name =
-                format!("{}-{}", path.file_name().unwrap().to_str().unwrap(), suffix);
-            tmp_path.set_file_name(tmp_file_name);
-            tmp_path
-        };
+        let mut iter = db.raw_iterator();
+        iter.seek_to_first();
 
-        let tmp_path = create_path("migrate1");
-        let tmp = Merk::open(&tmp_path)?;
-        tmp.destroy()?;
+        while iter.valid() {
+            let key = iter.key().unwrap();
+            let mut value = iter.value().unwrap();
 
-        // TODO: split up batch
-        let batch: Vec<_> = db
-            .iterator(IteratorMode::Start)
-            .map(|entry| -> Result<_> {
-                dbg!();
-                let (key, node_bytes) = entry.unwrap(); // TODO
-                dbg!(&key, node_bytes.len());
-                let node = Tree::decode_v0(&mut &node_bytes[..])?;
-                dbg!();
-                Ok((key.to_vec(), Op::Put(node.value().to_vec())))
-            })
-            .collect::<Result<_>>()?;
+            let node = Tree::decode_v0(&mut value)?;
+            let new_value = node.encode();
+            db.put(key, new_value.as_slice())?;
 
-        let aux_cf = db.cf_handle(AUX_CF_NAME).unwrap();
-        let aux: Vec<_> = db
-            .iterator_cf(aux_cf, IteratorMode::Start)
-            .map(|entry| {
-                let (key, value) = entry.unwrap(); // TODO
-                (key.to_vec(), Op::Put(value.to_vec()))
-            })
-            .collect();
+            iter.next();
+        }
 
-        let mut tmp = Self::open(&tmp_path)?;
-        tmp.apply(&batch, &aux)?;
-        drop(tmp);
-
-        let tmp_path2 = create_path("migrate2");
-        std::fs::rename(&path, &tmp_path2)?;
-        std::fs::rename(&tmp_path, &path)?;
-        std::fs::remove_dir_all(&tmp_path2)?;
+        db.put_cf(
+            db.cf_handle(INTERNAL_CF_NAME).unwrap(),
+            FORMAT_VERSION_KEY,
+            FORMAT_VERSION.to_be_bytes(),
+        )?;
 
         Ok(())
     }
