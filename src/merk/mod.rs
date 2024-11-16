@@ -306,7 +306,7 @@ impl Merk {
     pub fn migrate_from_v0<P: AsRef<Path>>(path: P) -> Result<()> {
         let path = path.as_ref().to_path_buf();
         let db =
-            rocksdb::DB::open_cf_descriptors(&Merk::default_db_opts(), &path, column_families())?;
+            rocksdb::DB::open_cf_descriptors(&Merk::default_db_opts(), path, column_families())?;
 
         let mut iter = db.raw_iterator();
         iter.seek_to_first();
