@@ -197,17 +197,20 @@ pub(crate) fn verify_leaf<I: Iterator<Item = Result<Op>>>(
 #[cfg(feature = "full")]
 pub(crate) fn verify_trunk<I: Iterator<Item = Result<Op>>>(ops: I) -> Result<(ProofTree, usize)> {
     fn verify_height_proof(tree: &ProofTree) -> Result<usize> {
-        Ok(match tree.child(true) {
-            Some(child) => {
-                if let Node::Hash(_) = child.tree.node {
-                    return Err(Error::UnexpectedNode(
-                        "Expected height proof to only contain KV and KVHash nodes".into(),
-                    ));
-                }
-                verify_height_proof(&child.tree)? + 1
+        let mut height = 1;
+        let mut cursor = tree;
+        while let Some(child) = cursor.child(true) {
+            if let Node::Hash(_) = child.tree.node {
+                return Err(Error::UnexpectedNode(
+                    "Expected height proof to only contain KV and KVHash
+        nodes"
+                        .into(),
+                ));
             }
-            None => 1,
-        })
+            height += 1;
+            cursor = &child.tree;
+        }
+        Ok(height)
     }
 
     fn verify_completeness(tree: &ProofTree, remaining_depth: usize, leftmost: bool) -> Result<()> {
@@ -253,6 +256,11 @@ pub(crate) fn verify_trunk<I: Iterator<Item = Result<Op>>>(ops: I) -> Result<(Pr
     })?;
 
     let height = verify_height_proof(&tree)?;
+    if height > 64 {
+        // This is a sanity check to prevent stack overflows in `verify_completeness`,
+        // but any tree above 64 is probably an error (~3.7e19 nodes).
+        return Err(Error::Tree("Tree is too large".into()));
+    }
     let trunk_height = height / 2;
 
     if trunk_height < MIN_TRUNK_HEIGHT {
@@ -268,12 +276,11 @@ pub(crate) fn verify_trunk<I: Iterator<Item = Result<Op>>>(ops: I) -> Result<(Pr
 
 #[cfg(test)]
 mod tests {
-    use std::usize;
-
     use super::super::tree::Tree;
     use super::*;
     use crate::test_utils::*;
     use crate::tree::{NoopCommit, PanicSource, Tree as BaseTree};
+    use ed::Encode;
 
     #[derive(Default)]
     struct NodeCounts {
@@ -466,5 +473,22 @@ mod tests {
         assert_eq!(counts.kv, 15);
         assert_eq!(counts.hash, 0);
         assert_eq!(counts.kvhash, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Tree is too large")]
+    fn test_verify_height_stack_overflow() {
+        let height = 5_000u32;
+        let push_op = |i: u32| Op::Push(Node::KV(i.to_be_bytes().to_vec(), vec![]));
+        let mut ops = Vec::with_capacity((height * 2) as usize);
+        ops.push(push_op(0));
+        for i in 1..height {
+            ops.push(push_op(i));
+            ops.push(Op::Parent)
+        }
+        assert!(ops.encoding_length().unwrap() < 50_000);
+        println!("Len: {}", ops.encoding_length().unwrap());
+        let (_, result_height) = verify_trunk(ops.into_iter().map(Ok)).unwrap();
+        assert_eq!(height, result_height as u32);
     }
 }
