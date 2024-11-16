@@ -114,7 +114,8 @@ impl Merk {
         P: AsRef<Path>,
     {
         let db_opts = Merk::default_db_opts();
-        let db = rocksdb::DB::open_cf_descriptors(&db_opts, path, column_families())?;
+        let db =
+            rocksdb::DB::open_cf_descriptors_read_only(&db_opts, path, column_families(), false)?;
         let aux_cf = db.cf_handle(AUX_CF_NAME).unwrap();
         Ok(db.get_cf(aux_cf, key)?)
     }
