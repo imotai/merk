@@ -10,6 +10,7 @@ use super::Tree;
 
 /// Represents a reference to a child tree node. Links may or may not contain
 /// the child's `Tree` instance (storing its key if not).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     /// Represents a child tree node which has been pruned from memory, only
     /// retaining a reference to it (its key). The child node can always be
@@ -23,11 +24,10 @@ pub enum Link {
     /// Represents a tree node which has been modified since the `Tree`'s last
     /// hash computation. The child's hash is not stored since it has not yet
     /// been recomputed. The child's `Tree` instance is stored in the link.
-    #[rustfmt::skip]
     Modified {
         pending_writes: usize, // TODO: rename to `pending_hashes`
         child_heights: (u8, u8),
-        tree: Tree
+        tree: Tree,
     },
 
     // Represents a tree node which has been modified since the `Tree`'s last
@@ -154,8 +154,8 @@ impl Link {
         right_height as i8 - left_height as i8
     }
 
-    /// Consumes the link and converts to variant `Link::Reference`. Panics if the
-    /// link is of variant `Link::Modified` or `Link::Uncommitted`.
+    /// Consumes the link and converts to variant `Link::Reference`. Panics if
+    /// the link is of variant `Link::Modified` or `Link::Uncommitted`.
     #[inline]
     pub fn into_reference(self) -> Self {
         match self {
@@ -221,9 +221,12 @@ impl Encode for Link {
             Link::Modified { .. } => panic!("No encoding for Link::Modified"),
         };
 
-        debug_assert!(key.len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
+        );
 
-        out.write_all(&[key.len() as u8])?;
+        out.write_all(&(key.len() as u16).to_be_bytes())?;
         out.write_all(key)?;
 
         out.write_all(hash)?;
@@ -235,7 +238,10 @@ impl Encode for Link {
 
     #[inline]
     fn encoding_length(&self) -> Result<usize> {
-        debug_assert!(self.key().len() < 256, "Key length must be less than 256");
+        debug_assert!(
+            self.key().len() < 65536,
+            "Key length must be less than 65536"
+        );
 
         Ok(match self {
             Link::Reference { key, .. } => 1 + key.len() + 32 + 2,
@@ -254,6 +260,25 @@ impl Link {
             hash: Default::default(),
             child_heights: (0, 0),
         }
+    }
+
+    pub(crate) fn decode_v0<R: Read>(mut input: R) -> Result<Self> {
+        let length = read_u8(&mut input)? as usize;
+
+        let mut key = vec![0; length];
+        input.read_exact(&mut key)?;
+
+        let mut hash = [0; 32];
+        input.read_exact(&mut hash)?;
+
+        let left_height = read_u8(&mut input)?;
+        let right_height = read_u8(input)?;
+
+        Ok(Link::Reference {
+            key,
+            hash,
+            child_heights: (left_height, right_height),
+        })
     }
 }
 
@@ -279,7 +304,7 @@ impl Decode for Link {
             ref mut child_heights,
         } = self
         {
-            let length = read_u8(&mut input)? as usize;
+            let length = read_u16(&mut input)? as usize;
 
             key.resize(length, 0);
             input.read_exact(key.as_mut())?;
@@ -299,6 +324,13 @@ impl Decode for Link {
 impl Terminated for Link {}
 
 #[inline]
+fn read_u16<R: Read>(mut input: R) -> Result<u16> {
+    let mut length = [0, 0];
+    input.read_exact(length.as_mut())?;
+    Ok(u16::from_be_bytes(length))
+}
+
+#[inline]
 fn read_u8<R: Read>(mut input: R) -> Result<u8> {
     let mut length = [0];
     input.read_exact(length.as_mut())?;
@@ -312,31 +344,33 @@ mod test {
     use super::*;
 
     #[test]
-    fn from_modified_tree() {
-        let tree = Tree::new(vec![0], vec![1]);
+    fn from_modified_tree() -> std::result::Result<(), &'static str> {
+        let tree = Tree::new(vec![0], vec![1]).map_err(|_| "tree construction failed")?;
         let link = Link::from_modified_tree(tree);
         assert!(link.is_modified());
         assert_eq!(link.height(), 1);
         assert_eq!(link.tree().expect("expected tree").key(), &[0]);
         if let Link::Modified { pending_writes, .. } = link {
             assert_eq!(pending_writes, 1);
+            Ok(())
         } else {
-            panic!("Expected Link::Modified");
+            Err("Expected Link::Modified")
         }
     }
 
     #[test]
-    fn maybe_from_modified_tree() {
+    fn maybe_from_modified_tree() -> std::result::Result<(), crate::error::Error> {
         let link = Link::maybe_from_modified_tree(None);
         assert!(link.is_none());
 
-        let tree = Tree::new(vec![0], vec![1]);
+        let tree = Tree::new(vec![0], vec![1])?;
         let link = Link::maybe_from_modified_tree(Some(tree));
         assert!(link.expect("expected link").is_modified());
+        Ok(())
     }
 
     #[test]
-    fn types() {
+    fn types() -> std::result::Result<(), crate::error::Error> {
         let hash = NULL_HASH;
         let child_heights = (0, 0);
         let pending_writes = 1;
@@ -351,17 +385,17 @@ mod test {
         let modified = Link::Modified {
             pending_writes,
             child_heights,
-            tree: tree(),
+            tree: tree()?,
         };
         let uncommitted = Link::Uncommitted {
             hash,
             child_heights,
-            tree: tree(),
+            tree: tree()?,
         };
         let loaded = Link::Loaded {
             hash,
             child_heights,
-            tree: tree(),
+            tree: tree()?,
         };
 
         assert!(reference.is_reference());
@@ -396,17 +430,21 @@ mod test {
         assert_eq!(loaded.hash(), &[0; 32]);
         assert_eq!(loaded.height(), 1);
         assert!(loaded.into_reference().is_reference());
+        Ok(())
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Cannot get hash from modified link")]
     fn modified_hash() {
-        Link::Modified {
-            pending_writes: 1,
-            child_heights: (1, 1),
-            tree: Tree::new(vec![0], vec![1]),
-        }
-        .hash();
+        Tree::new(vec![0], vec![1])
+            .map(|tree| Link::Modified {
+                pending_writes: 1,
+                child_heights: (1, 1),
+                tree,
+            })
+            .map(|link| link.hash().to_vec())
+            .map(|_| ())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -415,7 +453,7 @@ mod test {
         Link::Modified {
             pending_writes: 1,
             child_heights: (1, 1),
-            tree: Tree::new(vec![0], vec![1]),
+            tree: Tree::new(vec![0], vec![1]).expect("tree construction failed"),
         }
         .into_reference();
     }
@@ -426,7 +464,7 @@ mod test {
         Link::Uncommitted {
             hash: [1; 32],
             child_heights: (1, 1),
-            tree: Tree::new(vec![0], vec![1]),
+            tree: Tree::new(vec![0], vec![1]).expect("tree construction failed"),
         }
         .into_reference();
     }
@@ -445,17 +483,31 @@ mod test {
         assert_eq!(
             bytes,
             vec![
-                3, 1, 2, 3, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
-                55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 123, 124
+                0, 3, 1, 2, 3, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
+                55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 123, 124
             ]
         );
     }
 
     #[test]
-    #[should_panic]
-    fn encode_link_long_key() {
+    fn encode_link_long_key_valid() {
         let link = Link::Reference {
-            key: vec![123; 300],
+            key: vec![123; 60_000],
+            child_heights: (123, 124),
+            hash: [55; 32],
+        };
+        let mut bytes = vec![];
+        link.encode_into(&mut bytes).unwrap();
+
+        let decoded = Link::decode(&bytes[..]).unwrap();
+        assert_eq!(decoded, link);
+    }
+
+    #[test]
+    #[should_panic = "Key length must be less than 65536"]
+    fn encode_link_long_key_invalid() {
+        let link = Link::Reference {
+            key: vec![123; 70_000],
             child_heights: (123, 124),
             hash: [55; 32],
         };

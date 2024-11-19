@@ -2,6 +2,7 @@ use super::super::Node;
 use crate::{Error, Result};
 use std::collections::btree_map;
 use std::collections::BTreeMap;
+use std::iter::Peekable;
 use std::ops::{Bound, RangeBounds};
 
 /// `MapBuilder` allows a consumer to construct a `Map` by inserting the nodes
@@ -47,10 +48,12 @@ impl MapBuilder {
     }
 }
 
-/// `Map` stores data extracted from a proof (which has already been verified
-/// against a known root hash), and allows a consumer to access the data by
-/// looking up individual keys using the `get` method, or iterating over ranges
-/// using the `range` method.
+/// `Map` stores data extracted from a proof.
+///
+/// The data (which has already been verified against a known root hash) can be
+/// accessed by a consumer by looking up individual keys using the `get` method,
+/// or iterating over ranges using the `range` method.
+#[derive(Clone, Debug)]
 pub struct Map {
     entries: BTreeMap<Vec<u8>, (bool, Vec<u8>)>,
     right_edge: bool,
@@ -81,16 +84,69 @@ impl Map {
     /// of keys. If during iteration we encounter a gap in the data (e.g. the
     /// proof did not include all nodes within the range), the iterator will
     /// yield an error.
-    pub fn range<'a, R: RangeBounds<&'a [u8]>>(&'a self, bounds: R) -> Range {
-        let start_key = bound_to_inner(bounds.start_bound()).map(|x| (*x).into());
-        let bounds = bounds_to_vec(bounds);
+    pub fn range<'a>(&self, bounds: impl RangeBounds<&'a [u8]>) -> Range {
+        let start_bound = bound_to_inner(bounds.start_bound());
+        let end_bound = bound_to_inner(bounds.end_bound());
+        let outer_bounds = (
+            start_bound.map_or(Bound::Unbounded, |k| {
+                self.entries
+                    .range(..=k.to_vec())
+                    .next_back()
+                    .map_or(Bound::Unbounded, |prev| Bound::Included(prev.0.clone()))
+            }),
+            end_bound.map_or(Bound::Unbounded, |k| {
+                self.entries
+                    .range(k.to_vec()..)
+                    .next()
+                    .map_or(Bound::Unbounded, |next| Bound::Included(next.0.clone()))
+            }),
+        );
 
         Range {
             map: self,
-            prev_key: start_key.as_ref().cloned(),
-            start_key,
-            iter: self.entries.range(bounds),
+            bounds: bounds_to_vec(bounds),
+            done: false,
+            iter: self.entries.range(outer_bounds).peekable(),
         }
+    }
+
+    /// Joins two `Map`s together, combining the data in both.
+    ///
+    /// If the maps contain contiguous iteration ranges, the contiguous ranges
+    /// will be joined. If the maps have differing values for the same key, this
+    /// will panic (this should never happen if the queries came from the same
+    /// root and the proofs were verified).
+    pub fn join(self, other: Map) -> Map {
+        // TODO: join at the partial tree level, joining with only Map data means
+        // data from different joins which happen to be contiguous (without explicitly
+        // querying based on next/prev) will be marked as non-contiguous
+        let mut entries = self.entries.clone();
+        entries.extend(other.entries);
+        for (key, (contiguous, val)) in entries.iter_mut() {
+            if let Some(shadowed) = self.entries.get(key) {
+                assert_eq!(val, &shadowed.1, "Maps have different values",);
+                *contiguous = *contiguous || shadowed.0;
+            }
+        }
+
+        Map {
+            entries,
+            right_edge: self.right_edge || other.right_edge,
+        }
+    }
+
+    /// Returns `true` if the [Map] can verify that there is no unproven data
+    /// between `key` and the node to its right (or the global tree edge).
+    ///
+    /// For example, if the underlying tree contains the key `[a, b, c, d]` and
+    /// the map contains the keys `[a, b, d]`, then `contiguous_right(a)` will
+    /// return `true`, `contiguous_right(b)` and `contiguous_right(c)` will
+    /// return `false`, and `contiguous_right(d)` will return `true`.
+    fn contiguous_right(&self, key: &[u8]) -> bool {
+        self.entries
+            .range((Bound::Excluded(key.to_vec()), Bound::Unbounded))
+            .next()
+            .map_or(self.right_edge, |(_, (contiguous, _))| *contiguous)
     }
 }
 
@@ -103,6 +159,7 @@ fn bound_to_inner<T>(bound: Bound<T>) -> Option<T> {
     }
 }
 
+/// Converts the inner key value of a `Bound` from a byte slice to a `Vec<u8>`.
 fn bound_to_vec(bound: Bound<&&[u8]>) -> Bound<Vec<u8>> {
     match bound {
         Bound::Unbounded => Bound::Unbounded,
@@ -111,54 +168,91 @@ fn bound_to_vec(bound: Bound<&&[u8]>) -> Bound<Vec<u8>> {
     }
 }
 
-fn bounds_to_vec<'a, R: RangeBounds<&'a [u8]>>(bounds: R) -> impl RangeBounds<Vec<u8>> {
+/// Converts the inner key values of a [RangeBounds] from byte slices to
+/// `Vec<u8>`.
+fn bounds_to_vec<'a, R: RangeBounds<&'a [u8]>>(bounds: R) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     (
         bound_to_vec(bounds.start_bound()),
         bound_to_vec(bounds.end_bound()),
     )
 }
 
-/// An iterator over (key, value) entries as extracted from a verified proof. If
-/// during iteration we encounter a gap in the data (e.g. the proof did not
+/// An iterator over (key, value) entries as extracted from a verified proof.
+///
+/// If during iteration we encounter a gap in the data (e.g. the proof did not
 /// include all nodes within the range), the iterator will yield an error.
 pub struct Range<'a> {
     map: &'a Map,
-    start_key: Option<Vec<u8>>,
-    iter: btree_map::Range<'a, Vec<u8>, (bool, Vec<u8>)>,
-    prev_key: Option<Vec<u8>>,
+    bounds: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    done: bool,
+    iter: Peekable<InnerRange<'a>>,
 }
 
+type InnerRange<'a> = btree_map::Range<'a, Vec<u8>, (bool, Vec<u8>)>;
+
 impl<'a> Range<'a> {
-    /// Returns an error if the proof does not properly prove the end of the
-    /// range.
-    fn check_end_bound(&self) -> Result<()> {
-        let excluded_data = match self.prev_key {
-            // unbounded end, ensure proof has not excluded data at global right
-            // edge of tree
-            None => !self.map.right_edge,
-
-            // bounded end (inclusive or exclusive), ensure we had an exact
-            // match or next node is contiguous
-            Some(ref key) => {
-                // get neighboring node to the right (if any)
-                let range = (Bound::Excluded(key.to_vec()), Bound::<Vec<u8>>::Unbounded);
-                let maybe_end_node = self.map.entries.range(range).next();
-
-                match maybe_end_node {
-                    // reached global right edge of tree
-                    None => !self.map.right_edge,
-
-                    // got end node, must be contiguous
-                    Some((_, (contiguous, _))) => !contiguous,
-                }
-            }
-        };
-
-        if excluded_data {
-            return Err(Error::MissingData);
+    fn yield_entry_if_contiguous(
+        &mut self,
+        entry: (&'a Vec<u8>, &'a (bool, Vec<u8>)),
+        contiguous: bool,
+        forward: bool,
+    ) -> Option<Result<(&'a [u8], &'a [u8])>> {
+        if !contiguous {
+            self.done = true;
+            return Some(Err(Error::MissingData));
         }
 
-        Ok(())
+        self.yield_entry(entry, forward)
+    }
+
+    fn yield_entry(
+        &mut self,
+        entry: (&'a Vec<u8>, &'a (bool, Vec<u8>)),
+        forward: bool,
+    ) -> Option<Result<(&'a [u8], &'a [u8])>> {
+        let (key, (_, value)) = entry;
+        if forward {
+            self.bounds.0 = Bound::Excluded(key.clone());
+        } else {
+            self.bounds.1 = Bound::Excluded(key.clone());
+        }
+        Some(Ok((key.as_slice(), value.as_slice())))
+    }
+
+    fn yield_none_if_contiguous(
+        &mut self,
+        contiguous: bool,
+    ) -> Option<Result<(&'a [u8], &'a [u8])>> {
+        self.done = true;
+
+        if !contiguous {
+            return Some(Err(Error::MissingData));
+        }
+
+        None
+    }
+
+    fn yield_next_if_contiguous(&mut self) -> Option<Result<(&'a [u8], &'a [u8])>> {
+        if let Some((_, (contiguous, _))) = self.iter.peek() {
+            if !contiguous {
+                self.done = true;
+                return Some(Err(Error::MissingData));
+            }
+        }
+
+        self.next()
+    }
+
+    fn yield_next_back_if_contiguous(
+        &mut self,
+        contiguous: bool,
+    ) -> Option<Result<(&'a [u8], &'a [u8])>> {
+        if !contiguous {
+            self.done = true;
+            return Some(Err(Error::MissingData));
+        }
+
+        self.next_back()
     }
 }
 
@@ -166,37 +260,80 @@ impl<'a> Iterator for Range<'a> {
     type Item = Result<(&'a [u8], &'a [u8])>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (key, (contiguous, value)) = match self.iter.next() {
-            // no more items, ensure no data was excluded at end of range
-            None => {
-                return match self.check_end_bound() {
-                    Err(err) => Some(Err(err)),
-                    Ok(_) => None,
-                }
-            }
-
-            // got next item, destructure
-            Some((key, (contiguous, value))) => (key, (contiguous, value)),
-        };
-
-        self.prev_key = Some(key.clone());
-
-        // don't check for contiguous nodes if we have an exact match for lower
-        // bound
-        let skip_exclusion_check = if let Some(ref start_key) = self.start_key {
-            start_key == key
-        } else {
-            false
-        };
-
-        // if nodes weren't contiguous, we cannot verify that we have all values
-        // in the desired range
-        if !skip_exclusion_check && !contiguous {
-            return Some(Err(Error::MissingData));
+        if self.done {
+            return None;
         }
 
-        // passed checks, return entry
-        Some(Ok((key.as_slice(), value.as_slice())))
+        let entry = match self.iter.next() {
+            None => return self.yield_none_if_contiguous(self.map.right_edge),
+            Some(entry) => entry,
+        };
+        let (key, (contiguous, _)) = entry;
+
+        let past_start = match bound_to_inner(self.bounds.0.clone()) {
+            None => true,
+            Some(ref start_bound) => key > start_bound,
+        };
+        let at_start = match self.bounds.0 {
+            Bound::Unbounded => true,
+            Bound::Included(ref start_bound) => key == start_bound,
+            Bound::Excluded(_) => false,
+        };
+        let past_end = match self.bounds.1 {
+            Bound::Unbounded => false,
+            Bound::Included(ref end_bound) => key > end_bound,
+            Bound::Excluded(ref end_bound) => key >= end_bound,
+        };
+
+        if past_end {
+            self.yield_none_if_contiguous(*contiguous)
+        } else if past_start {
+            self.yield_entry_if_contiguous(entry, *contiguous, true)
+        } else if at_start {
+            self.yield_entry(entry, true)
+        } else {
+            self.yield_next_if_contiguous()
+        }
+    }
+}
+
+impl<'a> DoubleEndedIterator for Range<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        let entry = match self.iter.next_back() {
+            None => return self.yield_none_if_contiguous(self.map.contiguous_right(&[])),
+            Some(entry) => entry,
+        };
+        let (key, (contiguous_l, _)) = entry;
+        let contiguous_r = self.map.contiguous_right(key);
+
+        let past_end = match bound_to_inner(self.bounds.1.clone()) {
+            None => true,
+            Some(ref end_bound) => key < end_bound,
+        };
+        let at_end = match self.bounds.1 {
+            Bound::Unbounded => true,
+            Bound::Included(ref end_bound) => key == end_bound,
+            Bound::Excluded(_) => false,
+        };
+        let past_start = match self.bounds.0 {
+            Bound::Unbounded => false,
+            Bound::Included(ref start_bound) => key < start_bound,
+            Bound::Excluded(ref start_bound) => key <= start_bound,
+        };
+
+        if past_start {
+            self.yield_none_if_contiguous(contiguous_r)
+        } else if past_end {
+            self.yield_entry_if_contiguous(entry, contiguous_r, false)
+        } else if at_end {
+            self.yield_entry(entry, false)
+        } else {
+            self.yield_next_back_if_contiguous(*contiguous_l)
+        }
     }
 }
 
@@ -314,6 +451,16 @@ mod tests {
         assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 3][..], &[1][..]));
         assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
         assert!(range.next().is_none());
+        assert!(range.next_back().is_none());
+        assert!(range.next().is_none());
+    }
+
+    #[test]
+    fn range_empty() {
+        let map = MapBuilder::new().build();
+        let mut range = map.range(..);
+        assert!(range.next().is_none());
+        assert!(range.next_back().is_none());
     }
 
     #[test]
@@ -328,6 +475,134 @@ mod tests {
 
         let mut range = map.range(..&[1u8, 2, 5][..]);
         range.next().unwrap().unwrap();
+        range.next().unwrap().unwrap();
+    }
+
+    #[test]
+    fn range_reach_proof_end() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![2])).unwrap();
+
+        let map = builder.build();
+        let mut range = map.range(&[1u8, 2, 3][..]..);
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 3][..], &[1][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
+        assert!(range.next().is_none());
+    }
+
+    #[test]
+    fn range_unbounded() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![2])).unwrap();
+
+        let map = builder.build();
+        let mut range = map.range(..);
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 3][..], &[1][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
+        assert!(range.next().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "MissingData")]
+    fn range_abridged_rev() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::Hash([0; HASH_LENGTH])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![2])).unwrap();
+
+        let map = builder.build();
+        let mut range = map.range(&[1u8, 2, 3][..]..=&[1u8, 2, 4][..]).rev();
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
+        range.next().unwrap().unwrap();
+    }
+
+    #[test]
+    fn range_ok_rev() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![2])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 5], vec![3])).unwrap();
+
+        let map = builder.build();
+        let mut range = map.range(&[1u8, 2, 3][..]..&[1u8, 2, 5][..]).rev();
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 3][..], &[1][..]));
+        assert!(range.next().is_none());
+        assert!(range.next_back().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "MissingData")]
+    fn range_upper_unbounded_map_non_contiguous() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::Hash([1; HASH_LENGTH])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![1])).unwrap();
+
+        let map = builder.build();
+
+        let mut range = map.range(&[1u8, 2, 3][..]..).rev();
+        range.next().unwrap().unwrap();
+        range.next().unwrap().unwrap();
+    }
+
+    #[test]
+    fn range_reach_proof_end_rev() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![2])).unwrap();
+
+        let map = builder.build();
+        let mut range = map.range(..&[1u8, 2, 5][..]).rev();
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 3][..], &[1][..]));
+        assert!(range.next().is_none());
+    }
+
+    #[test]
+    fn range_unbounded_rev() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1, 2, 3], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![1, 2, 4], vec![2])).unwrap();
+
+        let map = builder.build();
+        let mut range = map.range(..).rev();
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 4][..], &[2][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[1, 2, 3][..], &[1][..]));
+        assert!(range.next().is_none());
+    }
+
+    #[test]
+    fn map_join() {
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![2], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![3], vec![1])).unwrap();
+        builder.insert(&Node::Hash([0; HASH_LENGTH])).unwrap();
+        builder.insert(&Node::KV(vec![5], vec![1])).unwrap();
+        let a = builder.build();
+
+        let mut builder = MapBuilder::new();
+        builder.insert(&Node::KV(vec![1], vec![1])).unwrap();
+        builder.insert(&Node::Hash([0; HASH_LENGTH])).unwrap();
+        builder.insert(&Node::KV(vec![3], vec![1])).unwrap();
+        builder.insert(&Node::KV(vec![4], vec![1])).unwrap();
+        builder.insert(&Node::Hash([0; HASH_LENGTH])).unwrap();
+        let b = builder.build();
+
+        let joined = a.join(b);
+
+        let mut range = joined.range(..=&[4][..]);
         assert_eq!(range.next().unwrap().unwrap(), (&[1][..], &[1][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[2][..], &[1][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[3][..], &[1][..]));
+        assert_eq!(range.next().unwrap().unwrap(), (&[4][..], &[1][..]));
+        assert!(range.next().is_none());
+
+        let mut range = joined.range(&[5][..]..);
+        assert_eq!(range.next().unwrap().unwrap(), (&[5][..], &[1][..]));
+        assert!(range.next().is_none());
     }
 }

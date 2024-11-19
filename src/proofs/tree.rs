@@ -1,12 +1,14 @@
 use super::{Node, Op};
 use crate::error::{Error, Result};
-use crate::tree::{kv_hash, node_hash, Hash, NULL_HASH};
+use crate::tree::{kv_hash, node_hash, Hash, Hasher, NULL_HASH};
 
 /// Contains a tree's child node and its hash. The hash can always be assumed to
 /// be up-to-date.
 #[derive(Debug)]
 pub struct Child {
+    /// The child node.
     pub tree: Box<Tree>,
+    /// The hash of the child node.
     pub hash: Hash,
 }
 
@@ -14,9 +16,13 @@ pub struct Child {
 /// when verifying Merkle proofs.
 #[derive(Debug)]
 pub struct Tree {
+    /// The node at the root of this tree.
     pub node: Node,
+    /// The left child of this tree.
     pub left: Option<Child>,
+    /// The right child of this tree.
     pub right: Option<Child>,
+    /// The height of this tree.
     pub height: usize,
 }
 
@@ -35,24 +41,25 @@ impl From<Node> for Tree {
 impl PartialEq for Tree {
     /// Checks equality for the root hashes of the two trees.
     fn eq(&self, other: &Self) -> bool {
-        self.hash() == other.hash()
+        self.hash()
+            .and_then(|this_hash| other.hash().map(|other_hash| this_hash == other_hash))
+            .unwrap_or_default()
     }
 }
 
 impl Tree {
     /// Gets or computes the hash for this tree node.
-    pub fn hash(&self) -> Hash {
+    pub fn hash(&self) -> Result<Hash> {
         fn compute_hash(tree: &Tree, kv_hash: Hash) -> Hash {
-            node_hash(&kv_hash, &tree.child_hash(true), &tree.child_hash(false))
+            node_hash::<Hasher>(&kv_hash, &tree.child_hash(true), &tree.child_hash(false))
         }
 
         match &self.node {
-            Node::Hash(hash) => *hash,
-            Node::KVHash(kv_hash) => compute_hash(self, *kv_hash),
-            Node::KV(key, value) => {
-                let kv_hash = kv_hash(key.as_slice(), value.as_slice());
-                compute_hash(self, kv_hash)
-            }
+            Node::Hash(hash) => Ok(*hash),
+            Node::KVHash(kv_hash) => Ok(compute_hash(self, *kv_hash)),
+            Node::KV(key, value) => kv_hash::<Hasher>(key.as_slice(), value.as_slice())
+                .map(|kv_hash| compute_hash(self, kv_hash))
+                .map_err(Into::into),
         }
     }
 
@@ -109,8 +116,8 @@ impl Tree {
         }
     }
 
-    /// Attaches the child to the `Tree`'s given side. Panics if there is
-    /// already a child attached to this side.
+    /// Attaches the child to the `Tree`'s given side. Returns an error if
+    /// there is already a child attached to this side.
     pub(crate) fn attach(&mut self, left: bool, child: Tree) -> Result<()> {
         if self.child(left).is_some() {
             return Err(Error::Attach(
@@ -118,9 +125,13 @@ impl Tree {
             ));
         }
 
+        if let Node::Hash(_) = self.node {
+            return Err(Error::Attach("Tried to attach to Hash node".into()));
+        }
+
         self.height = self.height.max(child.height + 1);
 
-        let hash = child.hash();
+        let hash = child.hash()?;
         let tree = Box::new(child);
         *self.child_mut(left) = Some(Child { tree, hash });
 
@@ -137,8 +148,8 @@ impl Tree {
 
     /// Consumes the tree node, calculates its hash, and returns a `Node::Hash`
     /// variant.
-    fn into_hash(self) -> Tree {
-        Node::Hash(self.hash()).into()
+    fn try_into_hash(self) -> Result<Tree> {
+        self.hash().map(Node::Hash).map(Into::into)
     }
 
     #[cfg(feature = "full")]
@@ -169,7 +180,8 @@ impl<'a> LayerIter<'a> {
         iter
     }
 
-    /// Builds up the stack by traversing through left children to the desired depth.
+    /// Builds up the stack by traversing through left children to the desired
+    /// depth.
     fn traverse_to_start(&mut self, tree: &'a Tree, remaining_depth: usize) {
         self.stack.push(tree);
 
@@ -249,12 +261,26 @@ where
         match op? {
             Op::Parent => {
                 let (mut parent, child) = (try_pop(&mut stack)?, try_pop(&mut stack)?);
-                parent.attach(true, if collapse { child.into_hash() } else { child })?;
+                parent.attach(
+                    true,
+                    if collapse {
+                        child.try_into_hash()?
+                    } else {
+                        child
+                    },
+                )?;
                 stack.push(parent);
             }
             Op::Child => {
                 let (child, mut parent) = (try_pop(&mut stack)?, try_pop(&mut stack)?);
-                parent.attach(false, if collapse { child.into_hash() } else { child })?;
+                parent.attach(
+                    false,
+                    if collapse {
+                        child.try_into_hash()?
+                    } else {
+                        child
+                    },
+                )?;
                 stack.push(parent);
             }
             Op::Push(node) => {
@@ -314,10 +340,12 @@ mod test {
             assert_eq!(tree.height, expected_height);
             tree.left
                 .as_ref()
-                .map(|l| recurse(&l.tree, expected_height - 1));
+                .into_iter()
+                .for_each(|l| recurse(&l.tree, expected_height - 1));
             tree.right
                 .as_ref()
-                .map(|r| recurse(&r.tree, expected_height - 1));
+                .into_iter()
+                .for_each(|r| recurse(&r.tree, expected_height - 1));
         }
 
         let tree = make_7_node_prooftree();

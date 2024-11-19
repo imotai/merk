@@ -30,7 +30,8 @@ where
     }
 
     /// Similar to `Tree#detach`, but yields a `Walker` which fetches from the
-    /// same source as `self`. Returned tuple is `(updated_self, maybe_child_walker)`.
+    /// same source as `self`. Returned tuple is `(updated_self,
+    /// maybe_child_walker)`.
     pub fn detach(mut self, left: bool) -> Result<(Self, Option<Self>)> {
         let link = match self.tree.link(left) {
             None => return Ok((self, None)),
@@ -56,7 +57,8 @@ where
     }
 
     /// Similar to `Tree#detach_expect`, but yields a `Walker` which fetches
-    /// from the same source as `self`. Returned tuple is `(updated_self, child_walker)`.
+    /// from the same source as `self`. Returned tuple is `(updated_self,
+    /// child_walker)`.
     pub fn detach_expect(self, left: bool) -> Result<(Self, Self)> {
         let (walker, maybe_child) = self.detach(left)?;
         if let Some(child) = maybe_child {
@@ -128,9 +130,9 @@ where
     }
 
     /// Similar to `Tree#with_value`.
-    pub fn with_value(mut self, value: Vec<u8>) -> Self {
-        self.tree.own(|t| t.with_value(value));
-        self
+    pub fn with_value(mut self, value: Vec<u8>) -> Result<Self> {
+        self.tree.own_fallible(|t| t.with_value(value))?;
+        Ok(self)
     }
 }
 
@@ -153,15 +155,15 @@ mod test {
     struct MockSource {}
 
     impl Fetch for MockSource {
-        fn fetch(&self, link: &Link) -> Result<Tree> {
-            Ok(Tree::new(link.key().to_vec(), b"foo".to_vec()))
+        fn fetch_by_key(&self, key: &[u8]) -> Result<Option<Tree>> {
+            Tree::new(key.to_vec(), b"foo".to_vec()).map(Some)
         }
     }
 
     #[test]
-    fn walk_modified() {
-        let tree = Tree::new(b"test".to_vec(), b"abc".to_vec())
-            .attach(true, Some(Tree::new(b"foo".to_vec(), b"bar".to_vec())));
+    fn walk_modified() -> Result<()> {
+        let tree = Tree::new(b"test".to_vec(), b"abc".to_vec())?
+            .attach(true, Some(Tree::new(b"foo".to_vec(), b"bar".to_vec())?));
 
         let source = MockSource {};
         let walker = Walker::new(tree, source);
@@ -173,12 +175,13 @@ mod test {
             })
             .expect("walk failed");
         assert!(walker.into_inner().child(true).is_none());
+        Ok(())
     }
 
     #[test]
-    fn walk_stored() {
-        let mut tree = Tree::new(b"test".to_vec(), b"abc".to_vec())
-            .attach(true, Some(Tree::new(b"foo".to_vec(), b"bar".to_vec())));
+    fn walk_stored() -> Result<()> {
+        let mut tree = Tree::new(b"test".to_vec(), b"abc".to_vec())?
+            .attach(true, Some(Tree::new(b"foo".to_vec(), b"bar".to_vec())?));
         tree.commit(&mut NoopCommit {}).expect("commit failed");
 
         let source = MockSource {};
@@ -191,6 +194,7 @@ mod test {
             })
             .expect("walk failed");
         assert!(walker.into_inner().child(true).is_none());
+        Ok(())
     }
 
     #[test]
@@ -220,8 +224,8 @@ mod test {
     }
 
     #[test]
-    fn walk_none() {
-        let tree = Tree::new(b"test".to_vec(), b"abc".to_vec());
+    fn walk_none() -> Result<()> {
+        let tree = Tree::new(b"test".to_vec(), b"abc".to_vec())?;
 
         let source = MockSource {};
         let walker = Walker::new(tree, source);
@@ -232,5 +236,6 @@ mod test {
                 Ok(None)
             })
             .expect("walk failed");
+        Ok(())
     }
 }

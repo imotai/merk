@@ -1,8 +1,9 @@
+#![allow(missing_docs)]
+
 mod crash_merk;
 mod temp_merk;
 
 use crate::tree::{Batch, BatchEntry, NoopCommit, Op, PanicSource, Tree, Walker};
-use byteorder::{BigEndian, WriteBytesExt};
 use rand::prelude::*;
 use std::convert::TryInto;
 use std::ops::Range;
@@ -63,10 +64,7 @@ pub fn apply_to_memonly(maybe_tree: Option<Tree>, batch: &Batch) -> Option<Tree>
 }
 
 pub fn seq_key(n: u64) -> Vec<u8> {
-    let mut key = vec![0; 0];
-    key.write_u64::<BigEndian>(n)
-        .expect("writing to key failed");
-    key
+    n.to_be_bytes().to_vec()
 }
 
 pub fn put_entry_value() -> Vec<u8> {
@@ -124,7 +122,7 @@ pub fn make_tree_rand(node_count: u64, batch_size: u64, initial_seed: u64) -> Tr
     assert!((node_count % batch_size) == 0);
 
     let value = vec![123; 60];
-    let mut tree = Tree::new(vec![0; 20], value);
+    let mut tree = Tree::new(vec![0; 20], value).expect("Tree construction failed");
 
     let mut seed = initial_seed;
 
@@ -147,7 +145,7 @@ pub fn make_tree_seq(node_count: u64) -> Tree {
     };
 
     let value = vec![123; 60];
-    let mut tree = Tree::new(vec![0; 20], value);
+    let mut tree = Tree::new(vec![0; 20], value).expect("Tree construction failed");
 
     let batch_count = node_count / batch_size;
     for i in 0..batch_count {

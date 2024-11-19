@@ -12,8 +12,8 @@ pub struct CrashMerk {
 }
 
 impl CrashMerk {
-    /// Opens a `CrashMerk` at the given file path, creating a new one if it does
-    /// not exist.
+    /// Opens a `CrashMerk` at the given file path, creating a new one if it
+    /// does not exist.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<CrashMerk> {
         let merk = Merk::open(&path)?;
         let inner = Some(ManuallyDrop::new(merk));
@@ -74,7 +74,7 @@ mod tests {
     fn crash() {
         let path = std::thread::current().name().unwrap().to_owned();
 
-        let mut merk = CrashMerk::open(&path).expect("failed to open merk");
+        let mut merk = CrashMerk::open(path).expect("failed to open merk");
         merk.apply(&[(vec![1, 2, 3], Op::Put(vec![4, 5, 6]))], &[])
             .expect("apply failed");
         unsafe {

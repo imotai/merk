@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::tree::{Fetch, Hash, Link, RefWalker};
 use std::cmp::{max, min, Ordering};
 use std::collections::BTreeSet;
-use std::ops::{Range, RangeInclusive};
+use std::ops::RangeInclusive;
 
 pub use map::*;
 
@@ -52,7 +52,7 @@ impl Query {
     /// If a range including the range already exists in the query, this will
     /// have no effect. If the query already includes a range that overlaps with
     /// the range, the ranges will be joined together.
-    pub fn insert_range(&mut self, range: Range<Vec<u8>>) {
+    pub fn insert_range(&mut self, range: std::ops::Range<Vec<u8>>) {
         let range = QueryItem::Range(range);
         self.insert_item(range);
     }
@@ -111,7 +111,7 @@ impl IntoIterator for Query {
 #[derive(Clone, Debug)]
 pub enum QueryItem {
     Key(Vec<u8>),
-    Range(Range<Vec<u8>>),
+    Range(std::ops::Range<Vec<u8>>),
     RangeInclusive(RangeInclusive<Vec<u8>>),
 }
 
@@ -144,7 +144,7 @@ impl QueryItem {
         if end.1 {
             QueryItem::RangeInclusive(RangeInclusive::new(start, end.0.to_vec()))
         } else {
-            QueryItem::Range(Range {
+            QueryItem::Range(std::ops::Range {
                 start,
                 end: end.0.to_vec(),
             })
@@ -343,8 +343,8 @@ pub fn verify(bytes: &[u8], expected_hash: Hash) -> Result<Map> {
 
     let root = execute(ops, true, |node| map_builder.insert(node))?;
 
-    if root.hash() != expected_hash {
-        return Err(Error::HashMismatch(expected_hash, root.hash()));
+    if root.hash()? != expected_hash {
+        return Err(Error::HashMismatch(expected_hash, root.hash()?));
     }
 
     Ok(map_builder.build())
@@ -459,8 +459,8 @@ pub fn verify_query(
         }
     }
 
-    if root.hash() != expected_hash {
-        return Err(Error::HashMismatch(expected_hash, root.hash()));
+    if root.hash()? != expected_hash {
+        return Err(Error::HashMismatch(expected_hash, root.hash()?));
     }
 
     Ok(output)
@@ -474,17 +474,18 @@ mod test {
     use super::*;
     use crate::test_utils::make_tree_seq;
     use crate::tree::{NoopCommit, PanicSource, RefWalker, Tree};
+    use ed::Encode;
 
-    fn make_3_node_tree() -> Tree {
-        let mut tree = Tree::new(vec![5], vec![5])
-            .attach(true, Some(Tree::new(vec![3], vec![3])))
-            .attach(false, Some(Tree::new(vec![7], vec![7])));
+    fn make_3_node_tree() -> Result<Tree> {
+        let mut tree = Tree::new(vec![5], vec![5])?
+            .attach(true, Some(Tree::new(vec![3], vec![3])?))
+            .attach(false, Some(Tree::new(vec![7], vec![7])?));
         tree.commit(&mut NoopCommit {}).expect("commit failed");
-        tree
+        Ok(tree)
     }
 
-    fn verify_keys_test(keys: Vec<Vec<u8>>, expected_result: Vec<Option<Vec<u8>>>) {
-        let mut tree = make_3_node_tree();
+    fn verify_keys_test(keys: Vec<Vec<u8>>, expected_result: Vec<Option<Vec<u8>>>) -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let (proof, _) = walker
@@ -500,8 +501,8 @@ mod test {
         encode_into(proof.iter(), &mut bytes);
 
         let expected_hash = [
-            210, 251, 153, 236, 163, 232, 221, 236, 145, 128, 56, 36, 89, 114, 19, 225, 56, 160,
-            53, 63, 222, 201, 218, 28, 114, 241, 63, 41, 63, 93, 119, 189,
+            185, 181, 28, 21, 108, 13, 202, 48, 129, 184, 3, 8, 157, 78, 213, 241, 94, 200, 205,
+            95, 179, 177, 195, 177, 216, 233, 164, 73, 102, 32, 141, 37,
         ];
 
         let mut query = Query::new();
@@ -519,59 +520,60 @@ mod test {
         for (key, expected_value) in keys.iter().zip(expected_result.iter()) {
             assert_eq!(values.get(key), expected_value.as_ref());
         }
+        Ok(())
     }
 
     #[test]
-    fn root_verify() {
-        verify_keys_test(vec![vec![5]], vec![Some(vec![5])]);
+    fn root_verify() -> Result<()> {
+        verify_keys_test(vec![vec![5]], vec![Some(vec![5])])
     }
 
     #[test]
-    fn single_verify() {
-        verify_keys_test(vec![vec![3]], vec![Some(vec![3])]);
+    fn single_verify() -> Result<()> {
+        verify_keys_test(vec![vec![3]], vec![Some(vec![3])])
     }
 
     #[test]
-    fn double_verify() {
-        verify_keys_test(vec![vec![3], vec![5]], vec![Some(vec![3]), Some(vec![5])]);
+    fn double_verify() -> Result<()> {
+        verify_keys_test(vec![vec![3], vec![5]], vec![Some(vec![3]), Some(vec![5])])
     }
 
     #[test]
-    fn double_verify_2() {
-        verify_keys_test(vec![vec![3], vec![7]], vec![Some(vec![3]), Some(vec![7])]);
+    fn double_verify_2() -> Result<()> {
+        verify_keys_test(vec![vec![3], vec![7]], vec![Some(vec![3]), Some(vec![7])])
     }
 
     #[test]
-    fn triple_verify() {
+    fn triple_verify() -> Result<()> {
         verify_keys_test(
             vec![vec![3], vec![5], vec![7]],
             vec![Some(vec![3]), Some(vec![5]), Some(vec![7])],
-        );
+        )
     }
 
     #[test]
-    fn left_edge_absence_verify() {
-        verify_keys_test(vec![vec![2]], vec![None]);
+    fn left_edge_absence_verify() -> Result<()> {
+        verify_keys_test(vec![vec![2]], vec![None])
     }
 
     #[test]
-    fn right_edge_absence_verify() {
-        verify_keys_test(vec![vec![8]], vec![None]);
+    fn right_edge_absence_verify() -> Result<()> {
+        verify_keys_test(vec![vec![8]], vec![None])
     }
 
     #[test]
-    fn inner_absence_verify() {
-        verify_keys_test(vec![vec![6]], vec![None]);
+    fn inner_absence_verify() -> Result<()> {
+        verify_keys_test(vec![vec![6]], vec![None])
     }
 
     #[test]
-    fn absent_and_present_verify() {
-        verify_keys_test(vec![vec![5], vec![6]], vec![Some(vec![5]), None]);
+    fn absent_and_present_verify() -> Result<()> {
+        verify_keys_test(vec![vec![5], vec![6]], vec![Some(vec![5]), None])
     }
 
     #[test]
-    fn empty_proof() {
-        let mut tree = make_3_node_tree();
+    fn empty_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let (proof, absence) = walker
@@ -582,8 +584,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                218, 87, 59, 46, 181, 250, 196, 81, 201, 130, 112, 225, 149, 163, 111, 96, 187, 10,
-                253, 72, 152, 249, 133, 124, 74, 85, 119, 216, 3, 51, 85, 23
+                203, 210, 184, 52, 29, 56, 76, 7, 155, 239, 81, 16, 54, 13, 106, 27, 44, 218, 198,
+                245, 203, 189, 15, 203, 55, 184, 75, 146, 127, 38, 143, 214
             ])))
         );
         assert_eq!(
@@ -597,8 +599,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                157, 106, 215, 69, 200, 37, 192, 49, 179, 191, 192, 216, 235, 226, 168, 238, 86,
-                46, 126, 85, 209, 214, 128, 228, 162, 15, 20, 64, 234, 242, 215, 198
+                219, 24, 98, 131, 160, 47, 139, 94, 223, 118, 217, 187, 42, 215, 213, 101, 213,
+                225, 169, 57, 224, 210, 17, 135, 220, 63, 160, 42, 148, 0, 121, 115
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -609,11 +611,12 @@ mod test {
         encode_into(proof.iter(), &mut bytes);
         let res = verify_query(bytes.as_slice(), &Query::new(), tree.hash()).unwrap();
         assert!(res.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn root_proof() {
-        let mut tree = make_3_node_tree();
+    fn root_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let queryitems = vec![QueryItem::Key(vec![5])];
@@ -625,8 +628,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                218, 87, 59, 46, 181, 250, 196, 81, 201, 130, 112, 225, 149, 163, 111, 96, 187, 10,
-                253, 72, 152, 249, 133, 124, 74, 85, 119, 216, 3, 51, 85, 23
+                203, 210, 184, 52, 29, 56, 76, 7, 155, 239, 81, 16, 54, 13, 106, 27, 44, 218, 198,
+                245, 203, 189, 15, 203, 55, 184, 75, 146, 127, 38, 143, 214
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Push(Node::KV(vec![5], vec![5]))));
@@ -634,8 +637,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                157, 106, 215, 69, 200, 37, 192, 49, 179, 191, 192, 216, 235, 226, 168, 238, 86,
-                46, 126, 85, 209, 214, 128, 228, 162, 15, 20, 64, 234, 242, 215, 198
+                219, 24, 98, 131, 160, 47, 139, 94, 223, 118, 217, 187, 42, 215, 213, 101, 213,
+                225, 169, 57, 224, 210, 17, 135, 220, 63, 160, 42, 148, 0, 121, 115
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -650,11 +653,12 @@ mod test {
         }
         let res = verify_query(bytes.as_slice(), &query, tree.hash()).unwrap();
         assert_eq!(res, vec![(vec![5], vec![5])]);
+        Ok(())
     }
 
     #[test]
-    fn leaf_proof() {
-        let mut tree = make_3_node_tree();
+    fn leaf_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let queryitems = vec![QueryItem::Key(vec![3])];
@@ -675,8 +679,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                157, 106, 215, 69, 200, 37, 192, 49, 179, 191, 192, 216, 235, 226, 168, 238, 86,
-                46, 126, 85, 209, 214, 128, 228, 162, 15, 20, 64, 234, 242, 215, 198
+                219, 24, 98, 131, 160, 47, 139, 94, 223, 118, 217, 187, 42, 215, 213, 101, 213,
+                225, 169, 57, 224, 210, 17, 135, 220, 63, 160, 42, 148, 0, 121, 115
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -691,11 +695,12 @@ mod test {
         }
         let res = verify_query(bytes.as_slice(), &query, tree.hash()).unwrap();
         assert_eq!(res, vec![(vec![3], vec![3])]);
+        Ok(())
     }
 
     #[test]
-    fn double_leaf_proof() {
-        let mut tree = make_3_node_tree();
+    fn double_leaf_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let queryitems = vec![QueryItem::Key(vec![3]), QueryItem::Key(vec![7])];
@@ -726,11 +731,12 @@ mod test {
         }
         let res = verify_query(bytes.as_slice(), &query, tree.hash()).unwrap();
         assert_eq!(res, vec![(vec![3], vec![3]), (vec![7], vec![7]),]);
+        Ok(())
     }
 
     #[test]
-    fn all_nodes_proof() {
-        let mut tree = make_3_node_tree();
+    fn all_nodes_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let queryitems = vec![
@@ -762,11 +768,12 @@ mod test {
             res,
             vec![(vec![3], vec![3]), (vec![5], vec![5]), (vec![7], vec![7]),]
         );
+        Ok(())
     }
 
     #[test]
-    fn global_edge_absence_proof() {
-        let mut tree = make_3_node_tree();
+    fn global_edge_absence_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let queryitems = vec![QueryItem::Key(vec![8])];
@@ -778,8 +785,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                218, 87, 59, 46, 181, 250, 196, 81, 201, 130, 112, 225, 149, 163, 111, 96, 187, 10,
-                253, 72, 152, 249, 133, 124, 74, 85, 119, 216, 3, 51, 85, 23
+                203, 210, 184, 52, 29, 56, 76, 7, 155, 239, 81, 16, 54, 13, 106, 27, 44, 218, 198,
+                245, 203, 189, 15, 203, 55, 184, 75, 146, 127, 38, 143, 214
             ])))
         );
         assert_eq!(
@@ -803,11 +810,12 @@ mod test {
         }
         let res = verify_query(bytes.as_slice(), &query, tree.hash()).unwrap();
         assert_eq!(res, vec![]);
+        Ok(())
     }
 
     #[test]
-    fn absence_proof() {
-        let mut tree = make_3_node_tree();
+    fn absence_proof() -> Result<()> {
+        let mut tree = make_3_node_tree()?;
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
 
         let queryitems = vec![QueryItem::Key(vec![6])];
@@ -819,8 +827,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                218, 87, 59, 46, 181, 250, 196, 81, 201, 130, 112, 225, 149, 163, 111, 96, 187, 10,
-                253, 72, 152, 249, 133, 124, 74, 85, 119, 216, 3, 51, 85, 23
+                203, 210, 184, 52, 29, 56, 76, 7, 155, 239, 81, 16, 54, 13, 106, 27, 44, 218, 198,
+                245, 203, 189, 15, 203, 55, 184, 75, 146, 127, 38, 143, 214
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Push(Node::KV(vec![5], vec![5]))));
@@ -838,21 +846,22 @@ mod test {
         }
         let res = verify_query(bytes.as_slice(), &query, tree.hash()).unwrap();
         assert_eq!(res, vec![]);
+        Ok(())
     }
 
     #[test]
-    fn doc_proof() {
-        let mut tree = Tree::new(vec![5], vec![5])
+    fn doc_proof() -> Result<()> {
+        let mut tree = Tree::new(vec![5], vec![5])?
             .attach(
                 true,
                 Some(
-                    Tree::new(vec![2], vec![2])
-                        .attach(true, Some(Tree::new(vec![1], vec![1])))
+                    Tree::new(vec![2], vec![2])?
+                        .attach(true, Some(Tree::new(vec![1], vec![1])?))
                         .attach(
                             false,
                             Some(
-                                Tree::new(vec![4], vec![4])
-                                    .attach(true, Some(Tree::new(vec![3], vec![3]))),
+                                Tree::new(vec![4], vec![4])?
+                                    .attach(true, Some(Tree::new(vec![3], vec![3])?)),
                             ),
                         ),
                 ),
@@ -860,20 +869,20 @@ mod test {
             .attach(
                 false,
                 Some(
-                    Tree::new(vec![9], vec![9])
+                    Tree::new(vec![9], vec![9])?
                         .attach(
                             true,
                             Some(
-                                Tree::new(vec![7], vec![7])
-                                    .attach(true, Some(Tree::new(vec![6], vec![6])))
-                                    .attach(false, Some(Tree::new(vec![8], vec![8]))),
+                                Tree::new(vec![7], vec![7])?
+                                    .attach(true, Some(Tree::new(vec![6], vec![6])?))
+                                    .attach(false, Some(Tree::new(vec![8], vec![8])?)),
                             ),
                         )
                         .attach(
                             false,
                             Some(
-                                Tree::new(vec![11], vec![11])
-                                    .attach(true, Some(Tree::new(vec![10], vec![10]))),
+                                Tree::new(vec![11], vec![11])?
+                                    .attach(true, Some(Tree::new(vec![10], vec![10])?)),
                             ),
                         ),
                 ),
@@ -911,8 +920,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                180, 78, 218, 181, 40, 119, 102, 2, 245, 248, 164, 64, 124, 48, 21, 3, 44, 73, 17,
-                3, 131, 188, 171, 103, 58, 72, 20, 73, 155, 137, 46, 88
+                148, 241, 151, 144, 247, 220, 92, 79, 70, 252, 168, 222, 27, 218, 53, 156, 0, 136,
+                161, 107, 83, 78, 150, 246, 51, 230, 164, 248, 17, 30, 147, 91
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -924,11 +933,11 @@ mod test {
         assert_eq!(
             bytes,
             vec![
-                3, 1, 1, 0, 1, 1, 3, 1, 2, 0, 1, 2, 16, 3, 1, 3, 0, 1, 3, 3, 1, 4, 0, 1, 4, 16, 17,
-                2, 169, 4, 73, 65, 62, 49, 160, 159, 37, 166, 195, 249, 63, 31, 23, 11, 169, 0, 24,
-                104, 179, 211, 218, 38, 108, 129, 117, 232, 65, 101, 194, 157, 16, 1, 180, 78, 218,
-                181, 40, 119, 102, 2, 245, 248, 164, 64, 124, 48, 21, 3, 44, 73, 17, 3, 131, 188,
-                171, 103, 58, 72, 20, 73, 155, 137, 46, 88, 17
+                3, 0, 1, 1, 0, 1, 1, 3, 0, 1, 2, 0, 1, 2, 16, 3, 0, 1, 3, 0, 1, 3, 3, 0, 1, 4, 0,
+                1, 4, 16, 17, 2, 169, 4, 73, 65, 62, 49, 160, 159, 37, 166, 195, 249, 63, 31, 23,
+                11, 169, 0, 24, 104, 179, 211, 218, 38, 108, 129, 117, 232, 65, 101, 194, 157, 16,
+                1, 148, 241, 151, 144, 247, 220, 92, 79, 70, 252, 168, 222, 27, 218, 53, 156, 0,
+                136, 161, 107, 83, 78, 150, 246, 51, 230, 164, 248, 17, 30, 147, 91, 17
             ]
         );
 
@@ -948,6 +957,7 @@ mod test {
                 (vec![4], vec![4]),
             ]
         );
+        Ok(())
     }
 
     #[test]
@@ -1031,8 +1041,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                15, 172, 198, 205, 200, 229, 61, 211, 164, 58, 222, 10, 226, 47, 87, 80, 30, 147,
-                173, 69, 105, 61, 25, 156, 24, 57, 223, 170, 128, 100, 17, 32
+                131, 182, 249, 107, 5, 43, 253, 172, 175, 5, 92, 100, 112, 7, 61, 179, 216, 127,
+                180, 104, 127, 239, 76, 175, 20, 208, 82, 101, 163, 177, 107, 229
             ])))
         );
         assert_eq!(
@@ -1046,8 +1056,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                75, 196, 124, 123, 163, 233, 227, 122, 74, 21, 58, 149, 104, 157, 164, 30, 51, 247,
-                161, 209, 49, 51, 66, 219, 24, 35, 163, 64, 127, 116, 182, 92
+                71, 142, 184, 184, 188, 130, 2, 241, 17, 17, 179, 82, 112, 27, 31, 20, 92, 69, 145,
+                176, 112, 235, 30, 16, 54, 157, 64, 114, 154, 54, 63, 253
             ])))
         );
         assert_eq!(
@@ -1077,8 +1087,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                100, 103, 182, 36, 209, 104, 156, 135, 222, 97, 55, 87, 142, 199, 255, 98, 88, 151,
-                140, 201, 243, 181, 239, 121, 37, 81, 83, 252, 217, 161, 111, 67
+                150, 100, 68, 82, 53, 2, 5, 199, 230, 152, 77, 216, 114, 30, 205, 210, 226, 140,
+                161, 62, 235, 10, 116, 142, 115, 201, 56, 218, 44, 151, 86, 154
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -1118,8 +1128,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                15, 172, 198, 205, 200, 229, 61, 211, 164, 58, 222, 10, 226, 47, 87, 80, 30, 147,
-                173, 69, 105, 61, 25, 156, 24, 57, 223, 170, 128, 100, 17, 32
+                131, 182, 249, 107, 5, 43, 253, 172, 175, 5, 92, 100, 112, 7, 61, 179, 216, 127,
+                180, 104, 127, 239, 76, 175, 20, 208, 82, 101, 163, 177, 107, 229
             ])))
         );
         assert_eq!(
@@ -1133,8 +1143,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                75, 196, 124, 123, 163, 233, 227, 122, 74, 21, 58, 149, 104, 157, 164, 30, 51, 247,
-                161, 209, 49, 51, 66, 219, 24, 35, 163, 64, 127, 116, 182, 92
+                71, 142, 184, 184, 188, 130, 2, 241, 17, 17, 179, 82, 112, 27, 31, 20, 92, 69, 145,
+                176, 112, 235, 30, 16, 54, 157, 64, 114, 154, 54, 63, 253
             ])))
         );
         assert_eq!(
@@ -1164,8 +1174,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                100, 103, 182, 36, 209, 104, 156, 135, 222, 97, 55, 87, 142, 199, 255, 98, 88, 151,
-                140, 201, 243, 181, 239, 121, 37, 81, 83, 252, 217, 161, 111, 67
+                150, 100, 68, 82, 53, 2, 5, 199, 230, 152, 77, 216, 114, 30, 205, 210, 226, 140,
+                161, 62, 235, 10, 116, 142, 115, 201, 56, 218, 44, 151, 86, 154
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -1206,8 +1216,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                15, 172, 198, 205, 200, 229, 61, 211, 164, 58, 222, 10, 226, 47, 87, 80, 30, 147,
-                173, 69, 105, 61, 25, 156, 24, 57, 223, 170, 128, 100, 17, 32
+                131, 182, 249, 107, 5, 43, 253, 172, 175, 5, 92, 100, 112, 7, 61, 179, 216, 127,
+                180, 104, 127, 239, 76, 175, 20, 208, 82, 101, 163, 177, 107, 229
             ])))
         );
         assert_eq!(
@@ -1221,8 +1231,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                75, 196, 124, 123, 163, 233, 227, 122, 74, 21, 58, 149, 104, 157, 164, 30, 51, 247,
-                161, 209, 49, 51, 66, 219, 24, 35, 163, 64, 127, 116, 182, 92
+                71, 142, 184, 184, 188, 130, 2, 241, 17, 17, 179, 82, 112, 27, 31, 20, 92, 69, 145,
+                176, 112, 235, 30, 16, 54, 157, 64, 114, 154, 54, 63, 253
             ])))
         );
         assert_eq!(
@@ -1252,8 +1262,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                100, 103, 182, 36, 209, 104, 156, 135, 222, 97, 55, 87, 142, 199, 255, 98, 88, 151,
-                140, 201, 243, 181, 239, 121, 37, 81, 83, 252, 217, 161, 111, 67
+                150, 100, 68, 82, 53, 2, 5, 199, 230, 152, 77, 216, 114, 30, 205, 210, 226, 140,
+                161, 62, 235, 10, 116, 142, 115, 201, 56, 218, 44, 151, 86, 154
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -1294,8 +1304,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                15, 172, 198, 205, 200, 229, 61, 211, 164, 58, 222, 10, 226, 47, 87, 80, 30, 147,
-                173, 69, 105, 61, 25, 156, 24, 57, 223, 170, 128, 100, 17, 32
+                131, 182, 249, 107, 5, 43, 253, 172, 175, 5, 92, 100, 112, 7, 61, 179, 216, 127,
+                180, 104, 127, 239, 76, 175, 20, 208, 82, 101, 163, 177, 107, 229
             ])))
         );
         assert_eq!(
@@ -1309,8 +1319,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                75, 196, 124, 123, 163, 233, 227, 122, 74, 21, 58, 149, 104, 157, 164, 30, 51, 247,
-                161, 209, 49, 51, 66, 219, 24, 35, 163, 64, 127, 116, 182, 92
+                71, 142, 184, 184, 188, 130, 2, 241, 17, 17, 179, 82, 112, 27, 31, 20, 92, 69, 145,
+                176, 112, 235, 30, 16, 54, 157, 64, 114, 154, 54, 63, 253
             ])))
         );
         assert_eq!(
@@ -1340,8 +1350,8 @@ mod test {
         assert_eq!(
             iter.next(),
             Some(&Op::Push(Node::Hash([
-                100, 103, 182, 36, 209, 104, 156, 135, 222, 97, 55, 87, 142, 199, 255, 98, 88, 151,
-                140, 201, 243, 181, 239, 121, 37, 81, 83, 252, 217, 161, 111, 67
+                150, 100, 68, 82, 53, 2, 5, 199, 230, 152, 77, 216, 114, 30, 205, 210, 226, 140,
+                161, 62, 235, 10, 116, 142, 115, 201, 56, 218, 44, 151, 86, 154
             ])))
         );
         assert_eq!(iter.next(), Some(&Op::Child));
@@ -1403,8 +1413,8 @@ mod test {
     }
 
     #[test]
-    fn verify_ops() {
-        let mut tree = Tree::new(vec![5], vec![5]);
+    fn verify_ops() -> Result<()> {
+        let mut tree = Tree::new(vec![5], vec![5])?;
         tree.commit(&mut NoopCommit {}).expect("commit failed");
 
         let root_hash = tree.hash();
@@ -1422,12 +1432,13 @@ mod test {
             map.get(vec![5].as_slice()).unwrap().unwrap(),
             vec![5].as_slice()
         );
+        Ok(())
     }
 
     #[test]
     #[should_panic(expected = "verify failed")]
     fn verify_ops_mismatched_hash() {
-        let mut tree = Tree::new(vec![5], vec![5]);
+        let mut tree = Tree::new(vec![5], vec![5]).expect("tree construction failed");
         tree.commit(&mut NoopCommit {}).expect("commit failed");
 
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
@@ -1445,7 +1456,7 @@ mod test {
     #[test]
     #[should_panic(expected = "verify failed")]
     fn verify_query_mismatched_hash() {
-        let mut tree = make_3_node_tree();
+        let mut tree = make_3_node_tree().expect("tree construction failed");
         let mut walker = RefWalker::new(&mut tree, PanicSource {});
         let keys = vec![vec![5], vec![7]];
         let (proof, _) = walker
@@ -1466,5 +1477,19 @@ mod test {
         }
 
         let _result = verify_query(bytes.as_slice(), &query, [42; 32]).expect("verify failed");
+    }
+
+    #[test]
+    #[should_panic(expected = "Tried to attach to Hash node")]
+    fn hash_attach() {
+        let mut target = make_3_node_tree().expect("tree construction failed");
+
+        let mut proof = Vec::new();
+        proof.push(Op::Push(Node::KV(vec![42], vec![42])));
+        proof.push(Op::Push(Node::Hash(target.hash())));
+        proof.push(Op::Parent);
+
+        let map = verify(&proof.encode().unwrap(), target.hash()).unwrap();
+        assert_eq!(map.get(&[42]).unwrap().unwrap(), &[42])
     }
 }

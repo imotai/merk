@@ -1,4 +1,8 @@
-use super::Tree;
+use std::io::Read;
+
+use crate::Result;
+
+use super::{kv::KV, Link, Tree, TreeInner};
 use ed::{Decode, Encode};
 
 impl Tree {
@@ -34,12 +38,37 @@ impl Tree {
         tree.inner.kv.key = key;
         tree
     }
+
+    pub fn decode_v0<R: Read>(mut input: R) -> Result<Self> {
+        let mut read_link_v0 = || -> Result<Option<Link>> {
+            let some = bool::decode(&mut input)?;
+            if some {
+                let link = Link::decode_v0(&mut input)?;
+                Ok(Some(link))
+            } else {
+                Ok(None)
+            }
+        };
+
+        let maybe_left = read_link_v0()?;
+        let maybe_right = read_link_v0()?;
+        let kv = KV::decode(&mut input)?;
+
+        Ok(Tree {
+            inner: Box::new(TreeInner {
+                left: maybe_left,
+                right: maybe_right,
+                kv,
+            }),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::Link;
     use super::*;
+    use crate::error::Result;
 
     #[test]
     fn encode_leaf_tree() {
@@ -64,7 +93,7 @@ mod tests {
             Some(Link::Modified {
                 pending_writes: 1,
                 child_heights: (123, 124),
-                tree: Tree::new(vec![2], vec![3]),
+                tree: Tree::new(vec![2], vec![3]).unwrap(),
             }),
             None,
         );
@@ -72,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_loaded_tree() {
+    fn encode_loaded_tree() -> Result<()> {
         let tree = Tree::from_fields(
             vec![0],
             vec![1],
@@ -80,23 +109,24 @@ mod tests {
             Some(Link::Loaded {
                 hash: [66; 32],
                 child_heights: (123, 124),
-                tree: Tree::new(vec![2], vec![3]),
+                tree: Tree::new(vec![2], vec![3])?,
             }),
             None,
         );
         assert_eq!(
             tree.encode(),
             vec![
-                1, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
+                1, 0, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
                 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 123, 124, 0, 55, 55, 55,
                 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
                 55, 55, 55, 55, 55, 55, 55, 55, 1
             ]
         );
+        Ok(())
     }
 
     #[test]
-    fn encode_uncommitted_tree() {
+    fn encode_uncommitted_tree() -> Result<()> {
         let tree = Tree::from_fields(
             vec![0],
             vec![1],
@@ -104,19 +134,20 @@ mod tests {
             Some(Link::Uncommitted {
                 hash: [66; 32],
                 child_heights: (123, 124),
-                tree: Tree::new(vec![2], vec![3]),
+                tree: Tree::new(vec![2], vec![3])?,
             }),
             None,
         );
         assert_eq!(
             tree.encode(),
             vec![
-                1, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
+                1, 0, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
                 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 123, 124, 0, 55, 55, 55,
                 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
                 55, 55, 55, 55, 55, 55, 55, 55, 1
             ]
         );
+        Ok(())
     }
 
     #[test]
@@ -136,7 +167,7 @@ mod tests {
         assert_eq!(
             tree.encode(),
             vec![
-                1, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
+                1, 0, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
                 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 123, 124, 0, 55, 55, 55,
                 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
                 55, 55, 55, 55, 55, 55, 55, 55, 1
@@ -158,7 +189,7 @@ mod tests {
     #[test]
     fn decode_reference_tree() {
         let bytes = vec![
-            1, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
+            1, 0, 1, 2, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66,
             66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 123, 124, 0, 55, 55, 55, 55, 55,
             55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
             55, 55, 55, 55, 55, 1,
@@ -173,8 +204,8 @@ mod tests {
         }) = tree.link(true)
         {
             assert_eq!(*key, [2]);
-            assert_eq!(*child_heights, (123 as u8, 124 as u8));
-            assert_eq!(*hash, [66 as u8; 32]);
+            assert_eq!(*child_heights, (123_u8, 124_u8));
+            assert_eq!(*hash, [66_u8; 32]);
         } else {
             panic!("Expected Link::Reference");
         }
